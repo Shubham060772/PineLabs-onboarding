@@ -1,0 +1,149 @@
+{
+  "0d2be9542057b621c1d019b3ab10061cd33b526eb66eb6c3d53f957409fa5578": {
+    "detected_document_type": "PAN_CARD",
+    "legibility": "CLEAR",
+    "legibility_issues": [],
+    "fields": {
+      "pan_number": {
+        "value": "ABCCK0001F",
+        "confidence": 0.99
+      },
+      "name": {
+        "value": "Kaveri Textiles Private Limited",
+        "confidence": 0.99
+      }
+    }
+  },
+  "8dd760145d2ee597e179e130d1dbcacb417708c3b5cde5da613856cc029a4a79": {
+    "detected_document_type": "GST_CERTIFICATE",
+    "legibility": "CLEAR",
+    "legibility_issues": [],
+    "fields": {
+      "gstin": {
+        "value": "33ABCCK0001F1ZG",
+        "confidence": 0.99
+      },
+      "legal_name": {
+        "value": "Kaveri Textiles Private Limited",
+        "confidence": 0.99
+      },
+      "trade_name": {
+        "value": "Kaveri Textiles",
+        "confidence": 0.99
+      }
+    }
+  },
+  "d1c34528c78e3775287ca400d37b22725583c6df07f0e66e9447c47642df0d5b": {
+    "detected_document_type": "BANK_PROOF",
+    "legibility": "CLEAR",
+    "legibility_issues": [],
+    "fields": {
+      "account_number": {
+        "value": "123456780001",
+        "confidence": 0.99
+      },
+      "ifsc": {
+        "value": "HDFC0001234",
+        "confidence": 0.99
+      },
+      "account_holder_name": {
+        "value": "Kaveri Textiles Private Limited",
+        "confidence": 0.99
+      },
+      "bank_name": {
+        "value": "Synthetic Demo Bank",
+        "confidence": 0.99
+      }
+    }
+  },
+  "8670d4200919a2e1bb640f61d0cea85b345b5162e61d72811c6818dfe48df3f5": {
+    "detected_document_type": "PAN_CARD",
+    "legibility": "UNREADABLE",
+    "legibility_issues": [
+      "Synthetic degraded sample"
+    ],
+    "fields": {
+      "pan_number": {
+        "value": null,
+        "confidence": 0
+      },
+      "name": {
+        "value": null,
+        "confidence": 0
+      }
+    }
+  },
+  "731fe875c3fdb2de1f2c039ddaec2f50a0ee961d8dadd4a1f9c48b9887097877": {
+    "detected_document_type": "PAN_CARD",
+    "legibility": "CLEAR",
+    "legibility_issues": [],
+    "fields": {
+      "pan_number": {
+        "value": "ABCCK0099F",
+        "confidence": 0.99
+      },
+      "name": {
+        "value": "Kaveri Textiles Private Limited",
+        "confidence": 0.99
+      }
+    }
+  },
+  "fc64a47b4222904f6e10da8536131b98935387cf0125e5a8096230b4e7b594d7": {
+    "detected_document_type": "GST_CERTIFICATE",
+    "legibility": "DEGRADED",
+    "legibility_issues": [
+      "Synthetic degraded sample"
+    ],
+    "fields": {
+      "gstin": {
+        "value": "33ABCCK0001F1ZG",
+        "confidence": 0.6
+      },
+      "legal_name": {
+        "value": "Kaveri Textiles Private Limited",
+        "confidence": 0.6
+      },
+      "trade_name": {
+        "value": "Kaveri Textiles",
+        "confidence": 0.6
+      }
+    }
+  },
+  "30c86544e42b4e589704eac5843365f7bd8944573b1c75d9e92d9971de7dc420": {
+    "detected_document_type": "BANK_PROOF",
+    "legibility": "CLEAR",
+    "legibility_issues": [],
+    "fields": {
+      "account_number": {
+        "value": "123456780001",
+        "confidence": 0.99
+      },
+      "ifsc": {
+        "value": "HDFC0001234",
+        "confidence": 0.99
+      },
+      "account_holder_name": {
+        "value": "Kaveri Textiles Private Limited",
+        "confidence": 0.99
+      },
+      "bank_name": {
+        "value": "Synthetic Demo Bank",
+        "confidence": 0.99
+      }
+    }
+  },
+  "7191e4390df85b0845bf8788d0eedce8f4244e5d2e9950158c6267e486d3c63b": {
+    "detected_document_type": "OTHER",
+    "legibility": "CLEAR",
+    "legibility_issues": [],
+    "fields": {}
+  },
+  "4baa1ee14f890852205f5a5aa950b2b31041f6bb96732544437f253e8d0aaee7": {
+    "detected_document_type": "UNKNOWN",
+    "legibility": "UNREADABLE",
+    "legibility_issues": [
+      "Synthetic degraded sample"
+    ],
+    "fields": {}
+  }
+}

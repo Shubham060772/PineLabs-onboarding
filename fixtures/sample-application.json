@@ -1,0 +1,19 @@
+{
+  "legal_name": "Kaveri Textiles Private Limited",
+  "trade_name": "Kaveri Textiles",
+  "business_type": "PRIVATE_LIMITED",
+  "business_category": "TEXTILES_RETAIL",
+  "contact_email": "owner1@synthetic.example",
+  "contact_phone": "+919800000001",
+  "address_line": "12 Mill Road",
+  "city": "Coimbatore",
+  "state": "TN",
+  "pincode": "641001",
+  "pan": "ABCCK0001F",
+  "gstin": "33ABCCK0001F1ZG",
+  "bank_account": {
+    "account_number": "123456780001",
+    "ifsc": "HDFC0001234",
+    "account_holder_name": "Kaveri Textiles Private Limited"
+  }
+}

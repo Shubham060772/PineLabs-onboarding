@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+.local/
+storage/
+test-results/
+playwright-report/
+coverage/
+*.log
+# User-supplied identity document; keep out of source control.
+/PAN Card.pdf

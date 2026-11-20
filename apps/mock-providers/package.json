@@ -1,0 +1,5 @@
+{
+  "name": "@onboard/mock-providers",
+  "private": true,
+  "type": "module"
+}

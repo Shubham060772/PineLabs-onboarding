@@ -1,0 +1,5 @@
+{
+  "name": "@onboard/api",
+  "private": true,
+  "type": "module"
+}
