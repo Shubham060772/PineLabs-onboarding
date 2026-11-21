@@ -5,7 +5,7 @@ All PDFs in this directory are fabricated test data, clearly labeled as syntheti
 1. Open **New application** in the merchant portal.
 2. Click **Use PDF sample details**. This fills the matching business, PAN, GSTIN and bank details and selects file upload mode.
 3. In **Documents**, upload `documents/pan_card.pdf`, `documents/gst_certificate.pdf` and `documents/bank_proof.pdf` into their corresponding slots. The wizard also provides download links.
-4. Submit and watch **Document processing** in Overview. All three should complete. Simulated provider checks then run. Reusing the same identifiers can correctly trigger duplicate review.
+4. Submit and watch **Document processing** in Overview. All three should complete. Simulated provider checks then run. If your merchant account already has an application for these details, use **Open existing application** to continue it. Matches across merchant accounts still trigger duplicate review.
 
 The complete matching form is in [sample-application.json](sample-application.json). **Fill synthetic sample** is a separate shortcut that generates fresh structured evidence; its random identifiers will not match these PDFs.
 

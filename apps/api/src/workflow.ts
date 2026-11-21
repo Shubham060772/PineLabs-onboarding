@@ -471,6 +471,15 @@ export async function receiveCallback(provider: string, payload: Callback) {
         rows: [attempt],
       } = await tx.query('SELECT * FROM check_attempts WHERE id=$1', [found.id]);
       if (
+        attempt.provider_request_id &&
+        attempt.provider_request_id !== payload.provider_request_id
+      )
+        throw new AppError(
+          'PROVIDER_REQUEST_MISMATCH',
+          'Callback does not match the acknowledged provider request',
+          400,
+        );
+      if (
         attempt.status === 'AWAITING_CALLBACK' &&
         attempt.deadline_at &&
         new Date(attempt.deadline_at) <= new Date()

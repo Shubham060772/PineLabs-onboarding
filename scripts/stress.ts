@@ -36,7 +36,7 @@ const { pool } = await import('../apps/api/src/db.js');
 const { buildServer } = await import('../apps/api/src/server.js');
 const { buildMockServer, startDeliveries } = await import('../apps/mock-providers/src/server.js');
 const { startWorker } = await import('../apps/api/src/jobs.js');
-const { signature } = await import('../apps/api/src/crypto.js');
+const { signature, decrypt } = await import('../apps/api/src/crypto.js');
 const api = await buildServer(),
   mock = await buildMockServer();
 await api.listen({ port: 3101, host: '127.0.0.1' });
@@ -348,7 +348,7 @@ try {
     invariants.rate_limit_and_service_survival = true;
   }
   // A dedicated Vite proxy preserves multipart bytes and never writes to the main database.
-  const { chromium } = await import('@playwright/test');
+  const { chromium, expect } = await import('@playwright/test');
   const { createServer } = await import('vite');
   const web = await createServer({
     configFile: 'apps/web/vite.config.ts',
@@ -395,6 +395,188 @@ try {
     assert.equal(errors.length, 0);
     invariants.no_browser_errors = true;
     assert.equal(count, 1, 'Save draft must preserve selected files');
+    const before = decrypt(
+      (await pool.query('SELECT form_enc FROM applications WHERE id=$1', [id])).rows[0].form_enc,
+    );
+    await page.getByRole('button', { name: 'Update application', exact: true }).click();
+    await page
+      .getByLabel('Account Holder Name', { exact: true })
+      .fill('Corrected Synthetic Holder');
+    await page.getByLabel('Ifsc', { exact: true }).fill('TEST0000001');
+    await page.getByLabel('Trade Name', { exact: true }).fill('');
+    await page.getByLabel('Pincode', { exact: true }).fill('');
+    const submitted = page.waitForResponse(
+      (r) => r.url().endsWith(`/applications/${id}/submit`) && r.request().method() === 'POST',
+    );
+    await page.getByRole('button', { name: 'Save & resubmit', exact: true }).click();
+    assert.equal((await submitted).status(), 202);
+    const after = decrypt(
+      (await pool.query('SELECT form_enc FROM applications WHERE id=$1', [id])).rows[0].form_enc,
+    );
+    assert.equal(after.bank_account.account_holder_name, 'Corrected Synthetic Holder');
+    assert.equal(after.bank_account.ifsc, 'TEST0000001');
+    assert.equal(after.bank_account.account_number, before.bank_account.account_number);
+    assert.equal(after.trade_name, '');
+    assert.equal(after.pincode, undefined);
+    invariants.optional_fields_can_be_cleared = true;
+    invariants.holder_and_ifsc_update_without_account_reentry = true;
+    const loginResult = await request('review_auth', '/api/v1/auth/login', {
+      method: 'POST',
+      body: { email: 'merchant@onboard.demo', password: 'DemoPass123!' },
+    });
+    const token = loginResult.data.token;
+    const reviewForm = uniqueDemoForm('Consistency Textiles Private Limited');
+    const created = await request('review_create', '/api/v1/applications', {
+      method: 'POST',
+      token,
+      body: reviewForm,
+    });
+    assert.equal(created.status, 201);
+    const reviewId = created.data.id;
+    const evidence = demoDocuments(reviewForm);
+    evidence.GST_CERTIFICATE.legal_name = 'Consistency Textiles Limited';
+    for (const [doc_type, structured_payload] of Object.entries(evidence)) {
+      assert.equal(
+        (
+          await request('review_upload', `/api/v1/applications/${reviewId}/documents`, {
+            method: 'POST',
+            token,
+            body: { doc_type, structured_payload },
+          })
+        ).status,
+        201,
+      );
+    }
+    assert.equal(
+      (
+        await request('review_submit', `/api/v1/applications/${reviewId}/submit`, {
+          method: 'POST',
+          token,
+        })
+      ).status,
+      202,
+    );
+    await expect
+      .poll(
+        async () =>
+          (await request('review_poll', `/api/v1/applications/${reviewId}`, { token })).data.status,
+        { timeout: 60000 },
+      )
+      .toBe('IN_REVIEW');
+    await page.goto(`http://localhost:5174/merchant/applications/${reviewId}`);
+    await expect(page.getByTestId('application-decision-summary')).toContainText(
+      'Application: In Review',
+    );
+    await expect(page.getByText('3 of 4 checks cleared', { exact: false })).toBeVisible();
+    await expect(page.getByTestId('document-GST_CERTIFICATE')).toContainText('In Review');
+    await expect(page.getByTestId('check-GST').locator('.badge')).toHaveText('In Review');
+    await expect(page.getByTestId('check-GST')).toContainText('Provider API (simulated): Passed');
+    await page.getByRole('tab', { name: 'Checks', exact: true }).click();
+    await expect(page.getByTestId('check-GST').locator('.badge')).toHaveText('In Review');
+    await page.getByRole('tab', { name: 'Fields & documents', exact: true }).click();
+    await expect(page.getByTestId('document-detail-GST_CERTIFICATE')).toContainText('In Review');
+    const operatorPage = await browser.newPage();
+    operatorPage.on('pageerror', (e) => errors.push(e.message));
+    await operatorPage.goto('http://localhost:5174/login');
+    await operatorPage.getByRole('button', { name: 'Operator Review & manage' }).click();
+    await operatorPage.getByRole('button', { name: 'Sign in', exact: true }).click();
+    await operatorPage.waitForURL('**/ops/applications');
+    await operatorPage.goto(`http://localhost:5174/ops/applications/${reviewId}`);
+    await expect(operatorPage.getByTestId('check-GST').locator('.badge')).toHaveText('In Review');
+    await operatorPage.getByRole('tab', { name: /^Exceptions/ }).click();
+    await operatorPage.getByRole('button', { name: 'Resolve exception' }).click();
+    await operatorPage
+      .getByLabel('Decision note')
+      .fill('Supporting evidence checked and name difference accepted.');
+    await operatorPage
+      .getByRole('button', { name: 'Resolve exception', exact: true })
+      .last()
+      .click();
+    await operatorPage.getByRole('tab', { name: 'Overview', exact: true }).click();
+    await expect(operatorPage.getByTestId('document-GST_CERTIFICATE')).toContainText('Completed');
+    await expect(operatorPage.getByTestId('check-GST').locator('.badge')).toHaveText('Passed');
+    await expect(operatorPage.getByTestId('application-decision-summary')).toContainText(
+      'An operator must still approve',
+    );
+    await page.getByRole('tab', { name: 'Overview', exact: true }).click();
+    await expect(page.getByTestId('document-GST_CERTIFICATE')).toContainText('Completed');
+    await expect(page.getByText('4 of 4 checks cleared', { exact: false })).toBeVisible();
+    invariants.review_status_consistent_across_roles_and_tabs = true;
+    const rejectionForm = uniqueDemoForm('Rejection Test Private Limited');
+    const rejection = await request('rejection_create', '/api/v1/applications', {
+      method: 'POST',
+      token,
+      body: rejectionForm,
+    });
+    assert.equal(rejection.status, 201);
+    const rejectionId = rejection.data.id;
+    const rejectionEvidence = demoDocuments(rejectionForm);
+    rejectionEvidence.GST_CERTIFICATE.legal_name = 'Rejection Test Limited';
+    for (const [doc_type, structured_payload] of Object.entries(rejectionEvidence))
+      assert.equal(
+        (
+          await request('rejection_upload', `/api/v1/applications/${rejectionId}/documents`, {
+            method: 'POST',
+            token,
+            body: { doc_type, structured_payload },
+          })
+        ).status,
+        201,
+      );
+    await request('rejection_submit', `/api/v1/applications/${rejectionId}/submit`, {
+      method: 'POST',
+      token,
+    });
+    await expect
+      .poll(
+        async () =>
+          (await request('rejection_poll', `/api/v1/applications/${rejectionId}`, { token })).data
+            .status,
+        { timeout: 60000 },
+      )
+      .toBe('IN_REVIEW');
+    await operatorPage.goto(`http://localhost:5174/ops/applications/${rejectionId}`);
+    await operatorPage.getByRole('button', { name: 'Reject', exact: true }).click();
+    await expect(operatorPage.getByLabel('Rejection reason')).toHaveValue('INVALID_DOCUMENTS');
+    await expect(operatorPage.getByLabel('Gst Certificate', { exact: true })).toBeChecked();
+    await operatorPage
+      .getByLabel('Decision note')
+      .fill('GST legal name does not match the declared business.');
+    await operatorPage.getByRole('button', { name: 'Reject', exact: true }).last().click();
+    await expect(operatorPage.getByTestId('application-decision-summary')).toContainText(
+      'Application: Rejected',
+    );
+    await expect(operatorPage.getByTestId('document-GST_CERTIFICATE').locator('.badge')).toHaveText(
+      'Invalid',
+    );
+    await operatorPage.getByRole('tab', { name: /^Exceptions/ }).click();
+    await expect(operatorPage.locator('.exception-full .badge')).toHaveText('Closed');
+    await page.goto(`http://localhost:5174/merchant/applications/${rejectionId}`);
+    await expect(page.getByTestId('check-GST').locator('.badge')).toHaveText('Invalid');
+    await expect(page.getByTestId('application-decision-summary')).toContainText(
+      'GST legal name does not match',
+    );
+    await page.getByRole('tab', { name: 'Fields & documents', exact: true }).click();
+    await expect(page.getByTestId('document-detail-GST_CERTIFICATE')).toContainText('Invalid');
+    invariants.rejection_closes_review_and_marks_selected_document_invalid = true;
+    const countBeforeRetry = (await pool.query('SELECT count(*)::int n FROM applications')).rows[0]
+      .n;
+    await page.goto('http://localhost:5174/merchant/applications/new');
+    await page.getByRole('button', { name: 'Use PDF sample details' }).click();
+    await page.getByRole('button', { name: 'Save draft', exact: true }).click();
+    await expect(page.getByRole('link', { name: 'Open existing application' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Open existing application' })).toHaveAttribute(
+      'href',
+      `/merchant/applications/${id}`,
+    );
+    assert.equal(
+      (await pool.query('SELECT count(*)::int n FROM applications')).rows[0].n,
+      countBeforeRetry,
+    );
+    await page.getByRole('link', { name: 'Open existing application' }).click();
+    await page.waitForURL(`**/merchant/applications/${id}`);
+    invariants.repeated_wizard_opens_existing_application = true;
+    assert.equal(errors.length, 0);
   } finally {
     await browser.close();
     await web.close();

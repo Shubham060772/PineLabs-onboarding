@@ -2099,3 +2099,10 @@ blockquote {
     grid-template-columns: 1fr;
   }
 }
+
+.field-error {
+  color: #a62722;
+}
+input[aria-invalid='true'] {
+  border-color: #a62722;
+}

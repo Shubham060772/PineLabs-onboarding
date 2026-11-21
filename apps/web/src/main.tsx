@@ -1,4 +1,4 @@
-import React, { useState, type ReactNode } from 'react';
+import React, { useRef, useState, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   BrowserRouter,
@@ -47,6 +47,9 @@ import {
   DOC_TYPES,
   documentFields,
   formSchema,
+  validPan,
+  validGstin,
+  normalize,
   type Form,
   type DocType,
   type User,
@@ -86,14 +89,21 @@ function Badge({ status }: { status: string }) {
       'APPLIED',
       'FULFILLED',
     ].includes(status),
-    bad = ['FAILED', 'REJECTED', 'ERROR', 'DEAD', 'CONFLICT', 'PROVISIONING_FAILED'].includes(
-      status,
-    ),
+    bad = [
+      'FAILED',
+      'INVALID',
+      'REJECTED',
+      'ERROR',
+      'DEAD',
+      'CONFLICT',
+      'PROVISIONING_FAILED',
+    ].includes(status),
     warn = [
       'BLOCKED',
       'WRONG_DOCUMENT_TYPE',
       'NEEDS_INFO',
       'IN_REVIEW',
+      'PENDING_VALIDATION',
       'TIMED_OUT',
       'LOW_CONFIDENCE',
       'LATE',
@@ -103,13 +113,41 @@ function Badge({ status }: { status: string }) {
     ].includes(status);
   return (
     <span
-      className={`badge ${good ? 'green' : bad ? 'red' : warn ? 'amber' : ['PENDING', 'DRAFT', 'SUPERSEDED'].includes(status) ? 'gray' : 'blue'}`}
+      className={`badge ${good ? 'green' : bad ? 'red' : warn ? 'amber' : ['PENDING', 'DRAFT', 'SUPERSEDED', 'CLOSED', 'CANCELLED'].includes(status) ? 'gray' : 'blue'}`}
     >
       <span className="status-dot" />
       {label(status)}
     </span>
   );
 }
+const names: Record<string, string> = {
+  legal_name: 'Legal business name',
+  contact_email: 'Contact email',
+  contact_phone: 'Phone',
+  address_line: 'Address',
+  ifsc: 'IFSC',
+  pan: 'PAN',
+  gstin: 'GSTIN',
+};
+const guidance: Record<string, string> = {
+  legal_name: 'Enter your registered business name (at least 2 characters).',
+  contact_email: 'Enter a valid contact email address.',
+  pincode: 'Enter a 6-digit pincode or leave it blank.',
+  pan: 'Enter a 10-character PAN, such as ABCDE1234F.',
+  gstin: 'Check the full 15-character GSTIN against your certificate.',
+  account_number: 'Enter 9 to 18 digits for your bank account number.',
+  ifsc: 'Enter an 11-character IFSC, such as ABCD0123456.',
+  account_holder_name: 'Enter the name on the bank account (at least 2 characters).',
+};
+function issueText(key: string, code?: string) {
+  const name = names[key] ?? label(key);
+  if (code === 'too_big')
+    return 'Shorten the ' + name.toLowerCase() + ' to fit the allowed length.';
+  return (
+    guidance[key] ?? 'Check the ' + (name.toLowerCase() || 'entered details') + ' and try again.'
+  );
+}
+const FieldErrors = React.createContext<Record<string, string>>({});
 function ErrorBox({ error }: { error: unknown }) {
   if (!error) return null;
   const e = error as ApiError;
@@ -131,7 +169,12 @@ function ErrorBox({ error }: { error: unknown }) {
           <ul>
             {e.details.map((x: any, i: number) => (
               <li key={i}>
-                {x.path}: {x.message}
+                {issueText(
+                  String(x.path ?? '')
+                    .split('.')
+                    .pop() ?? '',
+                  x.code,
+                )}
               </li>
             ))}
           </ul>
@@ -202,6 +245,8 @@ function Stat({
 }
 function Login() {
   const navigate = useNavigate();
+  const [registering, setRegistering] = useState(false);
+  const [name, setName] = useState('');
   const [email, setEmail] = useState('merchant@onboard.demo'),
     [password, setPassword] = useState('DemoPass123!'),
     [error, setError] = useState<unknown>(),
@@ -211,9 +256,11 @@ function Login() {
     setBusy(true);
     setError(null);
     try {
-      const result = await api('/auth/login', {
+      const result = await api(registering ? '/auth/register' : '/auth/login', {
         method: 'POST',
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify(
+          registering ? { email, password, display_name: name } : { email, password },
+        ),
       });
       sessionStorage.setItem('onboard.session', JSON.stringify(result));
       client.clear();
@@ -266,9 +313,25 @@ function Login() {
       <div className="login-panel">
         <form onSubmit={login}>
           <div className="eyebrow">WELCOME TO ONBOARD</div>
-          <h2>Your workspace awaits.</h2>
-          <p>Sign in to manage your onboarding journey.</p>
+          <h2>{registering ? 'Create a merchant account' : 'Your workspace awaits.'}</h2>
+          <p>
+            {registering
+              ? 'Register to submit and track your applications.'
+              : 'Sign in to manage your onboarding journey.'}
+          </p>
           <ErrorBox error={error} />
+          {registering && (
+            <label>
+              Display name
+              <input
+                required
+                maxLength={100}
+                autoComplete="name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+              />
+            </label>
+          )}
           <label>
             Email address
             <input
@@ -286,7 +349,9 @@ function Login() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
-              autoComplete="current-password"
+              autoComplete={registering ? 'new-password' : 'current-password'}
+              minLength={registering ? 8 : undefined}
+              placeholder={registering ? 'At least 8 characters' : undefined}
             />
           </label>
           <button className="primary full" disabled={busy}>
@@ -294,37 +359,54 @@ function Login() {
               <Loader2 className="spin" size={17} />
             ) : (
               <>
-                Sign in <ArrowRight size={17} />
+                {registering ? 'Create account' : 'Sign in'} <ArrowRight size={17} />
               </>
             )}
           </button>
-          <div className="demo-divider">EXPLORE THE DEMO</div>
-          <div className="demo-roles">
-            <button
-              type="button"
-              onClick={() => {
-                setEmail('merchant@onboard.demo');
-                setPassword('DemoPass123!');
-              }}
-            >
-              <Building2 size={20} />
-              <span>
-                Merchant<small>Submit & track</small>
-              </span>
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setEmail('operator@onboard.demo');
-                setPassword('DemoPass123!');
-              }}
-            >
-              <ShieldCheck size={20} />
-              <span>
-                Operator<small>Review & manage</small>
-              </span>
-            </button>
-          </div>
+          <button
+            type="button"
+            className="full"
+            disabled={busy}
+            onClick={() => {
+              setRegistering(!registering);
+              setEmail('');
+              setPassword('');
+              setError(null);
+            }}
+          >
+            {registering ? 'Back to sign in' : 'Register a merchant account'}
+          </button>
+          {!registering && (
+            <>
+              <div className="demo-divider">EXPLORE THE DEMO</div>
+              <div className="demo-roles">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEmail('merchant@onboard.demo');
+                    setPassword('DemoPass123!');
+                  }}
+                >
+                  <Building2 size={20} />
+                  <span>
+                    Merchant<small>Submit & track</small>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEmail('operator@onboard.demo');
+                    setPassword('DemoPass123!');
+                  }}
+                >
+                  <ShieldCheck size={20} />
+                  <span>
+                    Operator<small>Review & manage</small>
+                  </span>
+                </button>
+              </div>
+            </>
+          )}
           <p className="fine-print">Demo workspace · Synthetic data only</p>
         </form>
       </div>
@@ -606,6 +688,7 @@ function ApplicationList({ user }: { user: User }) {
               <thead>
                 <tr>
                   <th>BUSINESS / REFERENCE</th>
+                  {ops && <th>Submitted by</th>}
                   <th>STATUS</th>
                   {ops && <th>EXCEPTIONS</th>}
                   <th>TIME IN STATE</th>
@@ -627,6 +710,13 @@ function ApplicationList({ user }: { user: User }) {
                         </span>
                       </Link>
                     </td>
+                    {ops && (
+                      <td>
+                        <b>{a.submitted_by.display_name}</b>
+                        <br />
+                        <small>{a.submitted_by.email}</small>
+                      </td>
+                    )}
                     <td>
                       <Badge status={a.status} />
                     </td>
@@ -694,6 +784,8 @@ function Field({
   type?: string;
   hint?: string;
 }) {
+  const error = React.useContext(FieldErrors)[label(name)];
+  const errorId = React.useId();
   return (
     <label>
       {name}
@@ -703,8 +795,15 @@ function Field({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         required={required}
+        aria-invalid={!!error}
+        aria-describedby={error ? errorId : undefined}
       />
       {hint && <small>{hint}</small>}
+      {error && (
+        <small id={errorId} className="field-error">
+          {error}
+        </small>
+      )}
     </label>
   );
 }
@@ -779,6 +878,7 @@ function Wizard() {
     refetchInterval: 10000,
   });
   const [creationKey] = useState(() => crypto.randomUUID());
+  const saving = useRef(false);
   const [step, setStep] = useState(0),
     [form, setForm] = useState<Form>({
       legal_name: '',
@@ -795,7 +895,74 @@ function Wizard() {
     [error, setError] = useState<unknown>();
   const change = (key: keyof Form, value: any) => setForm((f) => ({ ...f, [key]: value }));
   const bank = form.bank_account ?? { account_number: '', ifsc: '', account_holder_name: '' };
+  const [validation, setValidation] = useState<'draft' | 'complete'>();
+  function issuesFor(section: number, draft: boolean) {
+    const errors: Record<string, string> = {};
+    const parsed = formSchema.safeParse(form);
+    if (!parsed.success)
+      for (const issue of parsed.error.issues) {
+        const root = issue.path[0];
+        const sectionIndex =
+          root === 'bank_account' ? 2 : root === 'pan' || root === 'gstin' ? 1 : 0;
+        if (sectionIndex !== section) continue;
+        const key = String(issue.path.at(-1));
+        errors[label(names[key] ?? key)] = issueText(key, issue.code);
+      }
+    if (!draft && section === 1) {
+      if (!validPan(form.pan ?? '')) errors.Pan = guidance.pan;
+      if (!validGstin(form.gstin ?? '')) errors.Gstin = guidance.gstin;
+      else if (!errors.Pan && normalize(form.gstin).slice(2, 12) !== normalize(form.pan))
+        errors.Gstin = 'Enter the GSTIN that contains the PAN above.';
+    }
+    if (!draft && section === 2 && !form.bank_account) {
+      for (const key of Object.keys(bank)) errors[label(names[key] ?? key)] = guidance[key];
+    }
+    if (section === 3)
+      for (const type of DOC_TYPES) {
+        const doc = docs[type];
+        if (doc.mode === 'file') {
+          if (!doc.file && !draft) errors[type] = 'Choose a file for ' + label(type) + '.';
+          if (
+            doc.file &&
+            (!doc.file.size ||
+              doc.file.size > 5 * 1024 * 1024 ||
+              !(
+                /\.(pdf|png|jpe?g)$/i.test(doc.file.name) ||
+                ['application/pdf', 'image/png', 'image/jpeg'].includes(doc.file.type)
+              ))
+          )
+            errors[type] = 'Choose a nonempty PDF, PNG or JPEG up to 5 MB.';
+        } else if (!draft) {
+          const missing = documentFields[type].filter(
+            (k) => !['bank_name', 'trade_name'].includes(k) && !doc.fields[k]?.trim(),
+          );
+          if (missing.length)
+            errors[type] = 'Fill in ' + missing.map(label).join(', ') + ' for ' + label(type) + '.';
+        }
+      }
+    return errors;
+  }
+  const errors = validation ? issuesFor(step, validation === 'draft') : {};
+  function validateThrough(end: number, draft = false) {
+    for (let section = 0; section < end; section++) {
+      if (Object.keys(issuesFor(section, draft)).length) {
+        setStep(section);
+        setValidation(draft ? 'draft' : 'complete');
+        setError(null);
+        return false;
+      }
+    }
+    return true;
+  }
+  function goTo(next: number) {
+    if (next > step && !validateThrough(next)) return;
+    setValidation(undefined);
+    setError(null);
+    setStep(next);
+  }
   async function save(submitNow = false) {
+    if (saving.current || !validateThrough(4, !submitNow)) return;
+    saving.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -822,17 +989,16 @@ function Wizard() {
       await client.invalidateQueries();
       navigate(`/merchant/applications/${appId}`);
     } catch (e: any) {
-      setError(
-        e.issues
-          ? new Error(e.issues.map((i: any) => `${i.path.join('.')}: ${i.message}`).join('; '))
-          : e,
-      );
+      setError(e);
     } finally {
+      saving.current = false;
       setBusy(false);
     }
   }
   function fillDemo() {
-    const f = uniqueDemoForm();
+    const f = uniqueDemoForm(
+      `Demo Textiles ${crypto.randomUUID().slice(0, 8).toUpperCase()} Private Limited`,
+    );
     setForm(f);
     setDocs(
       Object.fromEntries(
@@ -890,7 +1056,8 @@ function Wizard() {
             </a>
           ))}
           . Use “Use PDF sample details” to fill matching details, then select these files under
-          Documents. Reusing these identifiers may trigger duplicate review.
+          Documents. If you already used these details, open the existing application. “Fill
+          synthetic sample” generates a separate demo business with a distinct name and identifiers.
         </span>
       </div>
       <div className="wizard-layout">
@@ -899,7 +1066,7 @@ function Wizard() {
             <button
               key={s}
               className={i === step ? 'current' : i < step ? 'complete' : ''}
-              onClick={() => setStep(i)}
+              onClick={() => goTo(i)}
             >
               <span>{i < step ? <Check size={16} /> : i + 1}</span>
               <div>
@@ -932,118 +1099,139 @@ function Wizard() {
               : 'Please enter details as they appear on your official documents.'}
           </p>
           <ErrorBox error={error} />
-          {step === 0 && (
-            <div className="form-grid">
-              <Field
-                name="Legal business name"
-                value={form.legal_name}
-                onChange={(v) => change('legal_name', v)}
-                required
-              />
-              <Field
-                name="Trade name"
-                value={form.trade_name ?? ''}
-                onChange={(v) => change('trade_name', v)}
-              />
-              <label>
-                Business type
-                <select
-                  value={form.business_type}
-                  onChange={(e) => change('business_type', e.target.value)}
-                >
-                  {[
-                    'PROPRIETORSHIP',
-                    'PARTNERSHIP',
-                    'LLP',
-                    'PRIVATE_LIMITED',
-                    'PUBLIC_LIMITED',
-                  ].map((v) => (
-                    <option key={v} value={v}>
-                      {label(v)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <Field
-                name="Business category"
-                value={form.business_category ?? ''}
-                onChange={(v) => change('business_category', v)}
-              />
-              <Field
-                name="Contact email"
-                type="email"
-                value={form.contact_email}
-                onChange={(v) => change('contact_email', v)}
-                required
-              />
-              <Field
-                name="Phone"
-                value={form.contact_phone ?? ''}
-                onChange={(v) => change('contact_phone', v)}
-              />
-              <Field
-                name="Address"
-                value={form.address_line ?? ''}
-                onChange={(v) => change('address_line', v)}
-              />
-              <Field name="City" value={form.city ?? ''} onChange={(v) => change('city', v)} />
-              <Field name="State" value={form.state ?? ''} onChange={(v) => change('state', v)} />
-              <Field
-                name="Pincode"
-                value={form.pincode ?? ''}
-                onChange={(v) => change('pincode', v)}
-              />
+          {error instanceof ApiError &&
+            error.code === 'APPLICATION_EXISTS' &&
+            error.details?.application_id && (
+              <div className="notice">
+                <span>
+                  Continue with {error.details.reference} ({label(error.details.status)}).{' '}
+                  <Link to={`/merchant/applications/${error.details.application_id}`}>
+                    Open existing application
+                  </Link>
+                </span>
+              </div>
+            )}
+          {Object.keys(errors).length > 0 && (
+            <div role="alert" className="error">
+              Please complete the highlighted details in this section.
             </div>
           )}
-          {step === 1 && (
-            <div className="form-grid">
-              <Field
-                name="PAN"
-                value={form.pan ?? ''}
-                onChange={(v) => change('pan', v.toUpperCase())}
-                required
-                hint="10-character business PAN"
-              />
-              <Field
-                name="GSTIN"
-                value={form.gstin ?? ''}
-                onChange={(v) => change('gstin', v.toUpperCase())}
-                required
-                hint="15-character GST registration number"
-              />
-            </div>
-          )}
-          {step === 2 && (
-            <div className="form-grid">
-              <Field
-                name="Account number"
-                value={bank.account_number}
-                onChange={(v) => change('bank_account', { ...bank, account_number: v })}
-                required
-              />
-              <Field
-                name="IFSC"
-                value={bank.ifsc}
-                onChange={(v) => change('bank_account', { ...bank, ifsc: v.toUpperCase() })}
-                required
-              />
-              <Field
-                name="Account holder name"
-                value={bank.account_holder_name}
-                onChange={(v) => change('bank_account', { ...bank, account_holder_name: v })}
-                required
-              />
-            </div>
-          )}
-          {step === 3 &&
-            DOC_TYPES.map((type) => (
-              <DocumentEditor
-                key={type}
-                type={type}
-                value={docs[type]}
-                onChange={(value) => setDocs((d) => ({ ...d, [type]: value }))}
-              />
-            ))}
+          <FieldErrors.Provider value={errors}>
+            {step === 0 && (
+              <div className="form-grid">
+                <Field
+                  name="Legal business name"
+                  value={form.legal_name}
+                  onChange={(v) => change('legal_name', v)}
+                  required
+                />
+                <Field
+                  name="Trade name"
+                  value={form.trade_name ?? ''}
+                  onChange={(v) => change('trade_name', v)}
+                />
+                <label>
+                  Business type
+                  <select
+                    value={form.business_type}
+                    onChange={(e) => change('business_type', e.target.value)}
+                  >
+                    {[
+                      'PROPRIETORSHIP',
+                      'PARTNERSHIP',
+                      'LLP',
+                      'PRIVATE_LIMITED',
+                      'PUBLIC_LIMITED',
+                    ].map((v) => (
+                      <option key={v} value={v}>
+                        {label(v)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <Field
+                  name="Business category"
+                  value={form.business_category ?? ''}
+                  onChange={(v) => change('business_category', v)}
+                />
+                <Field
+                  name="Contact email"
+                  type="email"
+                  value={form.contact_email}
+                  onChange={(v) => change('contact_email', v)}
+                  required
+                />
+                <Field
+                  name="Phone"
+                  value={form.contact_phone ?? ''}
+                  onChange={(v) => change('contact_phone', v)}
+                />
+                <Field
+                  name="Address"
+                  value={form.address_line ?? ''}
+                  onChange={(v) => change('address_line', v)}
+                />
+                <Field name="City" value={form.city ?? ''} onChange={(v) => change('city', v)} />
+                <Field name="State" value={form.state ?? ''} onChange={(v) => change('state', v)} />
+                <Field
+                  name="Pincode"
+                  value={form.pincode ?? ''}
+                  onChange={(v) => change('pincode', v || undefined)}
+                />
+              </div>
+            )}
+            {step === 1 && (
+              <div className="form-grid">
+                <Field
+                  name="PAN"
+                  value={form.pan ?? ''}
+                  onChange={(v) => change('pan', v.toUpperCase())}
+                  required
+                  hint="10-character business PAN"
+                />
+                <Field
+                  name="GSTIN"
+                  value={form.gstin ?? ''}
+                  onChange={(v) => change('gstin', v.toUpperCase())}
+                  required
+                  hint="15-character GST registration number"
+                />
+              </div>
+            )}
+            {step === 2 && (
+              <div className="form-grid">
+                <Field
+                  name="Account number"
+                  value={bank.account_number}
+                  onChange={(v) => change('bank_account', { ...bank, account_number: v })}
+                  required
+                />
+                <Field
+                  name="IFSC"
+                  value={bank.ifsc}
+                  onChange={(v) => change('bank_account', { ...bank, ifsc: v.toUpperCase() })}
+                  required
+                />
+                <Field
+                  name="Account holder name"
+                  value={bank.account_holder_name}
+                  onChange={(v) => change('bank_account', { ...bank, account_holder_name: v })}
+                  required
+                />
+              </div>
+            )}
+            {step === 3 &&
+              DOC_TYPES.map((type) => (
+                <div key={type}>
+                  {errors[type] && <p className="field-error">{errors[type]}</p>}
+                  <DocumentEditor
+                    type={type}
+                    value={docs[type]}
+                    onChange={(value) => setDocs((d) => ({ ...d, [type]: value }))}
+                  />
+                </div>
+              ))}
+          </FieldErrors.Provider>
           {step === 4 && (
             <>
               <div className="review-summary">
@@ -1078,9 +1266,9 @@ function Wizard() {
               Save draft
             </button>
             <div>
-              {step > 0 && <button onClick={() => setStep(step - 1)}>Back</button>}
+              {step > 0 && <button onClick={() => goTo(step - 1)}>Back</button>}
               {step < 4 ? (
-                <button className="primary" onClick={() => setStep(step + 1)}>
+                <button className="primary" onClick={() => goTo(step + 1)}>
                   Continue
                   <ArrowRight size={16} />
                 </button>
@@ -1104,20 +1292,62 @@ function Wizard() {
   );
 }
 
-function CheckCards({ checks, blockedReason }: { checks: any[]; blockedReason?: string }) {
+function SubmitterInfo({ owner }: { owner: Pick<User, 'id' | 'display_name' | 'email'> }) {
+  const [feedback, setFeedback] = useState('');
+  async function copyId() {
+    try {
+      await navigator.clipboard.writeText(owner.id);
+      setFeedback('Copied');
+    } catch {
+      setFeedback('Select the user ID to copy it manually.');
+    }
+  }
+  return (
+    <div>
+      <p>
+        Submitted by {owner.display_name} · {owner.email}
+      </p>
+      <p>
+        User ID <code>{owner.id}</code>{' '}
+        <button type="button" onClick={copyId}>
+          Copy ID
+        </button>{' '}
+        <span role="status">{feedback}</span>
+      </p>
+    </div>
+  );
+}
+function CheckCards({
+  checks,
+  blockedReason,
+  rejected = false,
+}: {
+  checks: any[];
+  blockedReason?: string;
+  rejected?: boolean;
+}) {
   return (
     <div className="check-grid">
       {['PAN', 'GST', 'BANK', 'RISK'].map((type) => {
         const c = checks.find((c) => c.check_type === type),
           Icon = type === 'BANK' ? Landmark : type === 'RISK' ? ShieldCheck : FileText;
-        const blocked = blockedReason && (!c || c.status === 'PENDING');
+        const blocked =
+          !rejected &&
+          blockedReason &&
+          (!c || c.display_status === 'PENDING' || c.status === 'PENDING');
         return (
-          <div className="check-card" key={type}>
+          <div className="check-card" key={type} data-testid={`check-${type}`}>
             <div>
               <span className="check-icon">
                 <Icon size={20} />
               </span>
-              <Badge status={blocked ? 'BLOCKED' : (c?.status ?? 'PENDING')} />
+              <Badge
+                status={
+                  blocked
+                    ? 'BLOCKED'
+                    : (c?.display_status ?? c?.status ?? (rejected ? 'CANCELLED' : 'PENDING'))
+                }
+              />
             </div>
             <h3>
               {type === 'BANK'
@@ -1127,19 +1357,37 @@ function CheckCards({ checks, blockedReason }: { checks: any[]; blockedReason?: 
                   : `${type} verification`}
             </h3>
             <p>
-              {blocked
-                ? blockedReason
-                : c?.reason_code
-                  ? label(c.reason_code)
-                  : c?.blocked_by?.length
-                    ? `Waiting for ${c.blocked_by.join(', ')}`
-                    : c?.status === 'PASSED'
-                      ? 'Verified successfully'
-                      : c?.status === 'IN_PROGRESS'
-                        ? 'Awaiting provider response'
-                        : 'Ready when prerequisites pass'}
+              {rejected && !c
+                ? 'Not completed before application rejection.'
+                : blocked
+                  ? blockedReason
+                  : c?.display_message
+                    ? c.display_message
+                    : c?.reason_code
+                      ? label(c.reason_code)
+                      : c?.blocked_by?.length
+                        ? `Waiting for ${c.blocked_by.join(', ')}`
+                        : c?.status === 'PASSED'
+                          ? type === 'RISK'
+                            ? 'Assessment passed (simulated)'
+                            : 'Verified successfully (simulated)'
+                          : c?.status === 'IN_PROGRESS'
+                            ? 'Awaiting provider response'
+                            : 'Ready when prerequisites pass'}
             </p>
             <small>
+              {c && (
+                <>
+                  Provider API (simulated):{' '}
+                  {label(
+                    rejected && ['PENDING', 'IN_PROGRESS'].includes(c.status)
+                      ? 'CANCELLED'
+                      : c.status,
+                  )}
+                  {rejected ? ' — historical result' : ''}
+                  {c.input_current === false ? ' — previous details' : ''}.{' '}
+                </>
+              )}
               {c?.attempts.length ?? 0} attempt{c?.attempts.length === 1 ? '' : 's'}
             </small>
           </div>
@@ -1188,19 +1436,19 @@ function Detail({ user }: { user: User }) {
       : a.status === 'NEEDS_INFO'
         ? 'Blocked until the requested information is provided.'
         : undefined;
-  const stage = documentProblem
-    ? 2
-    : ['DRAFT', 'SUBMITTED', 'EXTRACTING', 'NEEDS_INFO'].includes(a.status)
-      ? a.status === 'DRAFT'
-        ? 0
-        : a.status === 'SUBMITTED'
-          ? 1
-          : 2
-      : a.status === 'VERIFYING'
-        ? 3
-        : ['IN_REVIEW', 'REJECTED'].includes(a.status)
-          ? 4
-          : 5;
+  const documentsCleared = DOC_TYPES.every((type) =>
+    a.documents.some((d: any) => d.doc_type === type && d.document_status === 'COMPLETED'),
+  );
+  const approved = ['APPROVED', 'ACTIVATED', 'PROVISIONING_FAILED'].includes(a.status);
+  const stagesDone = [
+    a.status !== 'DRAFT',
+    !['DRAFT', 'SUBMITTED'].includes(a.status),
+    documentsCleared,
+    a.verification_summary.total > 0 &&
+      a.verification_summary.cleared === a.verification_summary.total,
+    approved,
+    a.status === 'ACTIVATED',
+  ];
   return (
     <>
       <Link className="back-link" to={ops ? '/ops/applications' : '/merchant/applications'}>
@@ -1219,6 +1467,36 @@ function Detail({ user }: { user: User }) {
         </span>
       </PageTitle>
       <ErrorBox error={error} />
+      <div className="notice" data-testid="application-decision-summary">
+        <ShieldCheck size={20} />
+        <div>
+          <b>Application: {label(a.status)}</b>
+          {ops && a.submitted_by && (
+            <SubmitterInfo key={a.submitted_by.id} owner={a.submitted_by} />
+          )}
+          {a.status === 'REJECTED' && (
+            <p>
+              <b>{label(a.rejection_reason_code ?? 'REJECTED')}</b>
+              {a.decision_note ? `: ${a.decision_note}` : ''}
+            </p>
+          )}
+          <p>
+            {a.status === 'REJECTED'
+              ? 'The application was rejected. Historical provider results do not change that decision.'
+              : open.length > 0
+                ? `${open.length} open issue${open.length === 1 ? '' : 's'}. ${approved ? 'Activation requires attention.' : 'Approval is not complete.'}`
+                : a.status === 'IN_REVIEW'
+                  ? 'Review issues are resolved. An operator must still approve the application.'
+                  : a.status === 'NEEDS_INFO'
+                    ? 'Correct the requested information and resubmit.'
+                    : approved
+                      ? 'The application has been approved.'
+                      : 'Processing is not yet complete.'}{' '}
+            {a.verification_summary.documents_in_review > 0 &&
+              `${a.verification_summary.documents_in_review} document(s) still require review, even if the provider API passed.`}
+          </p>
+        </div>
+      </div>
       <div className="detail-actions">
         <span>
           <Clock3 size={15} />
@@ -1290,11 +1568,12 @@ function Detail({ user }: { user: User }) {
         <div className="tracker">
           {['Draft', 'Submitted', 'Documents', 'Verification', 'Decision', 'Activation'].map(
             (s, i) => (
-              <div key={s} className={i <= stage ? 'done' : ''}>
+              <div key={s} className={stagesDone[i] ? 'done' : ''}>
                 <span>
-                  {i === 2 && documentProblem ? (
+                  {i === 2 &&
+                  (documentProblem || a.verification_summary.documents_in_review > 0) ? (
                     <AlertCircle size={15} />
-                  ) : i < stage ? (
+                  ) : stagesDone[i] ? (
                     <Check size={15} />
                   ) : (
                     i + 1
@@ -1342,12 +1621,17 @@ function Detail({ user }: { user: User }) {
             })}
           </div>
           <div className="section-heading">
-            <h2>Verification progress</h2>
+            <h2>Verification and document clearance</h2>
             <span className="muted">
-              {a.checks.filter((c: any) => c.status === 'PASSED').length} of 4 checks passed
+              {a.verification_summary.cleared} of {a.verification_summary.total || 4} checks cleared
+              · {a.verification_summary.provider_passed} provider APIs passed (simulated)
             </span>
           </div>
-          <CheckCards checks={a.checks} blockedReason={blockedReason} />
+          <CheckCards
+            checks={a.checks}
+            blockedReason={blockedReason}
+            rejected={a.status === 'REJECTED'}
+          />
           <div className="two-col">
             <section className="panel padded">
               <h2>Business at a glance</h2>
@@ -1417,7 +1701,11 @@ function Detail({ user }: { user: User }) {
             </span>
           </div>
           {a.documents.map((d: any) => (
-            <section className="panel document-panel" key={d.id}>
+            <section
+              className="panel document-panel"
+              key={d.id}
+              data-testid={`document-detail-${d.doc_type}`}
+            >
               <div className="panel-title">
                 <h2>
                   <FileText size={19} />
@@ -1470,7 +1758,7 @@ function Detail({ user }: { user: User }) {
                             <small>{Math.round(f.confidence * 100)}%</small>
                           </td>
                           <td>
-                            <Badge status={f.validation ?? 'PENDING'} />
+                            <Badge status={f.display_status ?? f.validation ?? 'PENDING'} />
                           </td>
                         </tr>
                       );
@@ -1491,14 +1779,14 @@ function Detail({ user }: { user: User }) {
             <h2>Validation findings</h2>
             {a.findings.map((f: any, i: number) => (
               <div className="finding" key={i}>
-                {f.passed ? (
+                {f.passed || f.display_status === 'RESOLVED' ? (
                   <CheckCircle2 size={16} className="success-text" />
                 ) : (
                   <AlertCircle size={16} className="warning-text" />
                 )}
                 <code>{f.rule_code}</code>
-                <span>{f.message}</span>
-                <Badge status={f.passed ? 'PASSED' : f.severity} />
+                <span>{f.display_message ?? f.message}</span>
+                <Badge status={f.display_status ?? (f.passed ? 'PASSED' : f.severity)} />
               </div>
             ))}
           </section>
@@ -1506,7 +1794,23 @@ function Detail({ user }: { user: User }) {
       )}
       {tab === 'Checks' && (
         <>
-          <CheckCards checks={a.checks} blockedReason={blockedReason} />
+          <section className="panel padded">
+            <h2>Verification API flow</h2>
+            <p>
+              Document extraction → validation rules → provider API request → signed callback →
+              verification decision.
+            </p>
+            <p className="muted">
+              PAN, GST, bank and risk services are simulated for this demo. Requests and callbacks
+              run over HTTP; the provider references and timestamps below come from those calls.
+              Validation must pass before verification starts. Risk waits for PAN, GST and bank.
+            </p>
+          </section>
+          <CheckCards
+            checks={a.checks}
+            blockedReason={blockedReason}
+            rejected={a.status === 'REJECTED'}
+          />
           {a.checks.map((c: any) => (
             <section className="panel padded attempts" key={c.check_type}>
               <h2>
@@ -1514,8 +1818,9 @@ function Detail({ user }: { user: User }) {
               </h2>
               {!c.attempts.length ? (
                 <p className="muted">
-                  Not dispatched.{' '}
-                  {c.blocked_by.length ? `Waiting for ${c.blocked_by.join(', ')}` : ''}
+                  {a.status === 'REJECTED'
+                    ? 'Not dispatched. Application rejected.'
+                    : `Not dispatched. ${c.blocked_by.length ? `Waiting for ${c.blocked_by.join(', ')}` : ''}`}
                 </p>
               ) : (
                 c.attempts.map((at: any) => (
@@ -1525,7 +1830,16 @@ function Detail({ user }: { user: User }) {
                       <Badge status={at.status} />
                       <span className="muted">{date(at.created_at)}</span>
                     </div>
+                    <small>Request / attempt reference</small>
                     <code>{at.id}</code>
+                    {at.provider_request_id && (
+                      <>
+                        <small>Provider acknowledgement reference</small>
+                        <code>{at.provider_request_id}</code>
+                      </>
+                    )}
+                    {at.dispatched_at && <small>Request sent {date(at.dispatched_at)}</small>}
+                    {at.completed_at && <small>Attempt completed {date(at.completed_at)}</small>}
                     {at.deadline_at && <small>Deadline {date(at.deadline_at)}</small>}
                     {at.callbacks.map((cb: any) => (
                       <div className="callback" key={cb.event_id}>
@@ -1535,6 +1849,7 @@ function Detail({ user }: { user: User }) {
                           {cb.delivery_count} deliver{cb.delivery_count === 1 ? 'y' : 'ies'}
                         </span>
                         <code>{cb.event_id}</code>
+                        <small>Callback received {date(cb.first_received_at)}</small>
                       </div>
                     ))}
                   </div>
@@ -1574,9 +1889,11 @@ function Detail({ user }: { user: User }) {
                 {e.resolution_note && <blockquote>{e.resolution_note}</blockquote>}
                 <small>
                   {date(e.raised_at)} ·{' '}
-                  {e.reviewer_resolvable
-                    ? 'Reviewer judgement'
-                    : 'Requires a successful check or system recovery'}
+                  {e.status === 'CLOSED'
+                    ? 'Closed because application was rejected; no action pending.'
+                    : e.reviewer_resolvable
+                      ? 'Reviewer judgement'
+                      : 'Requires a successful check or system recovery'}
                 </small>
                 {ops &&
                   e.status === 'OPEN' &&
@@ -1682,7 +1999,18 @@ function ActionDialog({
   onClose: () => void;
 }) {
   const [note, setNote] = useState(''),
-    [reason, setReason] = useState('BUSINESS_REQUIREMENTS_NOT_MET'),
+    [reason, setReason] = useState(
+      a.documents.some((d: any) =>
+        ['IN_REVIEW', 'NEEDS_INFO', 'FAILED'].includes(d.document_status),
+      )
+        ? 'INVALID_DOCUMENTS'
+        : 'BUSINESS_REQUIREMENTS_NOT_MET',
+    ),
+    [rejectedDocs, setRejectedDocs] = useState<string[]>(
+      a.documents
+        .filter((d: any) => ['IN_REVIEW', 'NEEDS_INFO', 'FAILED'].includes(d.document_status))
+        .map((d: any) => d.doc_type),
+    ),
     [resolution, setResolution] = useState('ACCEPTED'),
     [target, setTarget] = useState('GST_CERTIFICATE'),
     [message, setMessage] = useState(''),
@@ -1710,7 +2038,13 @@ function ActionDialog({
         body.resolution = resolution;
       }
       if (action.startsWith('RERUN_CHECK:')) path = `checks/${action.split(':')[1]}/rerun`;
-      if (action === 'REJECT') body.reason_code = reason;
+      if (action === 'REJECT') {
+        body.reason_code = reason;
+        if (reason === 'INVALID_DOCUMENTS') {
+          if (!rejectedDocs.length) throw new Error('Select the document(s) causing rejection.');
+          body.document_types = rejectedDocs;
+        }
+      }
       if (action === 'REQUEST_INFO')
         body.items = [
           {
@@ -1752,19 +2086,40 @@ function ActionDialog({
           </>
         )}
         {action === 'REJECT' && (
-          <label>
-            Rejection reason
-            <select value={reason} onChange={(e) => setReason(e.target.value)}>
-              {[
-                'BUSINESS_REQUIREMENTS_NOT_MET',
-                'INVALID_DOCUMENTS',
-                'VERIFICATION_FAILED',
-                'DUPLICATE_APPLICATION',
-              ].map((v) => (
-                <option key={v}>{v}</option>
-              ))}
-            </select>
-          </label>
+          <>
+            <label>
+              Rejection reason
+              <select value={reason} onChange={(e) => setReason(e.target.value)}>
+                {[
+                  'BUSINESS_REQUIREMENTS_NOT_MET',
+                  'INVALID_DOCUMENTS',
+                  'VERIFICATION_FAILED',
+                  'DUPLICATE_APPLICATION',
+                ].map((v) => (
+                  <option key={v}>{v}</option>
+                ))}
+              </select>
+            </label>
+            {reason === 'INVALID_DOCUMENTS' && (
+              <fieldset>
+                <legend>Documents causing rejection</legend>
+                {DOC_TYPES.map((type) => (
+                  <label className="checkbox" key={type}>
+                    <input
+                      type="checkbox"
+                      checked={rejectedDocs.includes(type)}
+                      onChange={(e) =>
+                        setRejectedDocs((v) =>
+                          e.target.checked ? [...v, type] : v.filter((x) => x !== type),
+                        )
+                      }
+                    />
+                    {label(type)}
+                  </label>
+                ))}
+              </fieldset>
+            )}
+          </>
         )}
         {action.startsWith('RESOLVE') && (
           <label>
@@ -1780,10 +2135,9 @@ function ActionDialog({
           <textarea
             value={note}
             onChange={(e) => setNote(e.target.value)}
-            minLength={10}
             maxLength={1000}
             required
-            placeholder="Explain the reason for this action (at least 10 characters)."
+            placeholder="Reason for this action"
           />
         </label>
         <div className="notice">
@@ -1915,11 +2269,15 @@ function EditDialog({ application: a, onClose }: { application: any; onClose: ()
     setError(null);
     try {
       const { account_number, ifsc, account_holder_name, pan, gstin, ...rest } = form;
-      const patch: any = Object.fromEntries(Object.entries(rest).filter(([, v]) => v));
+      const patch: any = { ...rest, pincode: rest.pincode || null };
       if (pan) patch.pan = pan.toUpperCase();
       if (gstin) patch.gstin = gstin.toUpperCase();
-      if (account_number)
-        patch.bank_account = { account_number, ifsc: ifsc.toUpperCase(), account_holder_name };
+      const bankPatch: Record<string, string> = {};
+      if (account_number) bankPatch.account_number = account_number;
+      if (ifsc !== (a.form.bank_ifsc ?? '')) bankPatch.ifsc = ifsc.toUpperCase();
+      if (account_holder_name !== (a.form.bank_account_holder_name ?? ''))
+        bankPatch.account_holder_name = account_holder_name;
+      if (Object.keys(bankPatch).length) patch.bank_account = bankPatch;
       await api(`/applications/${a.id}`, { method: 'PATCH', body: JSON.stringify(patch) });
       for (const type of DOC_TYPES) if (docs[type]) await sendDocument(a.id, type, docs[type]!);
       await api(`/applications/${a.id}/submit`, { method: 'POST' });
@@ -2173,7 +2531,10 @@ function Metrics() {
               </p>
             </section>
             <section className="panel padded">
-              <h2>Check outcomes</h2>
+              <h2>Provider API outcomes (simulated)</h2>
+              <p className="fine-print">
+                Provider results are separate from document review and application approval.
+              </p>
               <table>
                 <thead>
                   <tr>

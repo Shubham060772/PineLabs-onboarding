@@ -3,7 +3,13 @@ import bcrypt from 'bcryptjs';
 import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { demoForm, demoDocuments } from '../packages/shared/src/demo.js';
-import { validPan, validGstin, type Form, type Scenario } from '../packages/shared/src/index.js';
+import {
+  validPan,
+  validGstin,
+  gstCheck,
+  type Form,
+  type Scenario,
+} from '../packages/shared/src/index.js';
 ensureEnv();
 export async function seedUsers() {
   const { pool } = await import('../apps/api/src/db.js');
@@ -141,6 +147,9 @@ export async function seedApplications() {
     await new Promise((r) => setTimeout(r, 1000));
   }
   const duplicate = demoForm(4, 'Nilgiri Tea Estates — Second Application');
+  // A distinct GST registration still shares PAN/bank details and needs review.
+  const secondRegistration = `27${duplicate.pan}1Z`;
+  duplicate.gstin = secondRegistration + gstCheck(secondRegistration);
   await add(7, duplicate.legal_name, 'IN_REVIEW', undefined, false, duplicate);
   await add(8, 'Aravalli Stone Works', 'IN_REVIEW', {
     target: 'risk',

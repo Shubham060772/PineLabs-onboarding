@@ -112,6 +112,11 @@ export const formSchema = z
   })
   .strict();
 export type Form = z.infer<typeof formSchema>;
+export const formPatchSchema = formSchema.partial().extend({
+  bank_account: bankSchema.partial().optional(),
+  pincode: formSchema.shape.pincode.unwrap().nullable().optional(),
+});
+export type FormPatch = z.infer<typeof formPatchSchema>;
 export const fieldSchema = z
   .object({ value: z.string().max(300).nullable(), confidence: z.number().min(0).max(1) })
   .strict();
@@ -142,10 +147,12 @@ export const infoItemSchema = z
     code: text.min(1),
     target_type: z.enum(['FIELD', 'DOCUMENT']),
     target: text.min(1),
-    message: text.min(5),
+    message: text.min(1, 'Enter a request for the merchant.'),
   })
   .strict();
-export const noteSchema = z.object({ note: z.string().trim().min(10).max(1000) });
+export const noteSchema = z.object({
+  note: z.string().trim().min(1, 'Enter a decision note.').max(1000),
+});
 export const callbackSchema = z
   .object({
     event_id: z.string().min(1).max(100),

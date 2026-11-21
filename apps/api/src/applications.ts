@@ -7,11 +7,13 @@ import {
   CHECK_TYPES,
   DOC_TYPES,
   documentFields,
+  formSchema,
   mask,
   system,
   type Actor,
   type User,
   type Form,
+  type FormPatch,
   type DocType,
 } from '../../../packages/shared/src/index.js';
 import {
@@ -29,6 +31,7 @@ import {
 import { blind, decrypt, encrypt, inputHash, sanitize, sha } from './crypto.js';
 import { approve, guard, reconcileChecks, evaluate, invalidateCheck } from './workflow.js';
 import { config } from './config.js';
+import { presentEvidence } from './presentation.js';
 
 export function authorize(app: Application, user: User, merchantOnly = false) {
   if (user.role === 'MERCHANT' && app.owner_user_id !== user.id)
@@ -57,6 +60,11 @@ export async function createApplication(form: Form, user: User, actor: Actor, ke
     throw new AppError('FORBIDDEN', 'Only merchants can create applications', 403);
   return transaction(async (tx) => {
     const requestHash = sha(JSON.stringify(form));
+    // Serialize creation per merchant so different browser keys cannot create
+    // the same registration concurrently. Other merchants remain independent.
+    await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [
+      `create-owner:${user.id}`,
+    ]);
     if (key) {
       await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [`${user.id}:${key}`]);
       const prior = await tx.query(
@@ -68,6 +76,27 @@ export async function createApplication(form: Form, user: User, actor: Actor, ke
           throw new AppError('IDEMPOTENCY_CONFLICT', 'This key was used with different input');
         return summary(prior.rows[0]);
       }
+    }
+    const existing = await tx.query(
+      `SELECT * FROM applications WHERE owner_user_id=$1 AND status<>'REJECTED'
+       AND (request_hash=$2 OR ($3::text IS NOT NULL AND gstin_bidx=$3)
+         OR ($3::text IS NULL AND gstin_bidx IS NULL AND $4::text IS NOT NULL AND pan_bidx=$4))
+       ORDER BY created_at DESC LIMIT 1`,
+      [
+        user.id,
+        requestHash,
+        form.gstin ? blind(form.gstin) : null,
+        form.pan ? blind(form.pan) : null,
+      ],
+    );
+    if (existing.rows[0]) {
+      const previous = existing.rows[0];
+      throw new AppError(
+        'APPLICATION_EXISTS',
+        'An application already exists for these details. Open it to continue.',
+        409,
+        { application_id: previous.id, reference: previous.reference, status: previous.status },
+      );
     }
     const {
       rows: [app],
@@ -154,6 +183,7 @@ export async function detail(id: string, user: User) {
       [id],
     );
     for (const c of checks) {
+      c.input_current = c.input_hash === inputHash(c.check_type, f);
       delete c.input_hash;
       c.blocked_by = c.depends_on.filter(
         (d: string) => !checks.some((x) => x.check_type === d && x.status === 'PASSED'),
@@ -180,7 +210,7 @@ export async function detail(id: string, user: User) {
       [id],
     );
     const { rows: findings } = await tx.query(
-      'SELECT rule_code,field_name,doc_type,severity,passed,message FROM validation_findings WHERE application_id=$1 AND data_version=$2',
+      'SELECT rule_code,field_name,doc_type,severity,passed,message,created_at FROM validation_findings WHERE application_id=$1 AND data_version=$2',
       [id, app.data_version],
     );
     const { rows: merchants } = await tx.query(
@@ -218,6 +248,15 @@ export async function detail(id: string, user: User) {
                 : 'Extraction and document validation completed.')));
       }
     }
+    const submitter =
+      user.role === 'OPERATOR'
+        ? (
+            await tx.query('SELECT id,display_name,email FROM users WHERE id=$1', [
+              app.owner_user_id,
+            ])
+          ).rows[0]
+        : undefined;
+    presentEvidence(docs, findings, exceptions, checks, app);
     const form = {
       ...f,
       pan: undefined,
@@ -231,9 +270,21 @@ export async function detail(id: string, user: User) {
     };
     return sanitize({
       ...summary(app),
+      submitted_by: submitter,
       data_version: app.data_version,
+      rejection_reason_code: app.rejection_reason_code,
+      decision_note: app.decision_note,
+      rejection_document_types: app.rejection_document_types,
       form,
       documents: docs,
+      verification_summary: {
+        application_status: app.status,
+        provider_passed: checks.filter((c) => c.status === 'PASSED' && c.input_current).length,
+        cleared: checks.filter((c) => c.display_status === 'PASSED').length,
+        total: checks.length,
+        documents_in_review: docs.filter((d) => d.document_status === 'IN_REVIEW').length,
+        open_exceptions: exceptions.filter((e) => e.status === 'OPEN').length,
+      },
       checks,
       exceptions: exceptions.map((e) => ({
         ...e,
@@ -248,7 +299,7 @@ export async function detail(id: string, user: User) {
     });
   });
 }
-export async function editApplication(id: string, patch: Partial<Form>, user: User, actor: Actor) {
+export async function editApplication(id: string, patch: FormPatch, user: User, actor: Actor) {
   return transaction(async (tx) => {
     const app = await lockApp(tx, id);
     authorize(app, user, true);
@@ -257,7 +308,16 @@ export async function editApplication(id: string, patch: Partial<Form>, user: Us
         'INVALID_STATE',
         'Application can only be edited in draft or while information is requested',
       );
-    await saveForm(tx, app, { ...formOf(app), ...patch });
+    const current = formOf(app);
+    const merged = {
+      ...current,
+      ...patch,
+      ...(patch.pincode === null ? { pincode: undefined } : {}),
+      ...(patch.bank_account !== undefined
+        ? { bank_account: { ...current.bank_account, ...patch.bank_account } }
+        : {}),
+    };
+    await saveForm(tx, app, formSchema.parse(merged));
     await audit(tx, id, 'APPLICATION_EDITED', actor, { fields: Object.keys(patch) });
     return summary(app);
   });
@@ -317,8 +377,6 @@ export async function storeDocument(
     mime = detectMime(input.file);
     hash = sha(input.file);
     storageKey = `${app.id}/${hash}`;
-    await mkdir(path.join(config.storage, app.id), { recursive: true });
-    await writeFile(path.join(config.storage, storageKey), input.file, { mode: 0o600 });
   } else {
     if (
       !input.structured_payload ||
@@ -329,6 +387,31 @@ export async function storeDocument(
         'Structured document contains unsupported fields',
         400,
       );
+  }
+  const {
+    rows: [active],
+  } = await tx.query(
+    'SELECT * FROM documents WHERE application_id=$1 AND doc_type=$2 AND is_active',
+    [app.id, input.doc_type],
+  );
+  const canonicalFields = (fields: Record<string, string>) =>
+    JSON.stringify(Object.entries(fields).sort(([a], [b]) => a.localeCompare(b)));
+  if (
+    active &&
+    (input.file
+      ? active.source === 'FILE' && active.sha256 === hash
+      : active.source === 'STRUCTURED' &&
+        canonicalFields(decrypt(active.payload_enc)) === canonicalFields(input.structured_payload!))
+  ) {
+    return {
+      id: active.id,
+      doc_type: active.doc_type,
+      extraction_status: active.extraction_status,
+    };
+  }
+  if (input.file && storageKey) {
+    await mkdir(path.join(config.storage, app.id), { recursive: true });
+    await writeFile(path.join(config.storage, storageKey), input.file, { mode: 0o600 });
   }
   await tx.query(
     'UPDATE documents SET is_active=false WHERE application_id=$1 AND doc_type=$2 AND is_active',
@@ -488,11 +571,35 @@ export async function operatorAction(
           [id],
         );
         if (action === 'reject') {
+          const rejectedDocs =
+            body.reason_code === 'INVALID_DOCUMENTS'
+              ? (body.document_types ??
+                (
+                  await tx.query(
+                    "SELECT DISTINCT doc_type FROM validation_findings WHERE application_id=$1 AND data_version=$2 AND NOT passed AND severity IN ('BLOCKING','REVIEW') AND doc_type IS NOT NULL",
+                    [id, app.data_version],
+                  )
+                ).rows.map((f) => f.doc_type))
+              : [];
           await transition(tx, app, 'REJECTED', actor);
           await tx.query(
-            'UPDATE applications SET decision_note=$2,rejection_reason_code=$3 WHERE id=$1',
-            [id, sanitize(body.note), body.reason_code],
+            'UPDATE applications SET decision_note=$2,rejection_reason_code=$3,rejection_document_types=$4 WHERE id=$1',
+            [id, sanitize(body.note), body.reason_code, rejectedDocs],
           );
+          const closed = await tx.query(
+            "UPDATE application_exceptions SET status='RESOLVED',resolution='APPLICATION_REJECTED',resolution_note=$2,resolved_at=now(),resolved_by=$3 WHERE application_id=$1 AND status='OPEN' RETURNING id",
+            [id, sanitize(body.note), user.id],
+          );
+          for (const exception of closed.rows)
+            await audit(tx, id, 'EXCEPTION_CLOSED', actor, {
+              exception_id: exception.id,
+              resolution: 'APPLICATION_REJECTED',
+            });
+          await audit(tx, id, 'APPLICATION_REJECTION_RECORDED', actor, {
+            reason_code: body.reason_code,
+            document_types: rejectedDocs,
+            note: body.note,
+          });
           await tx.query(
             "UPDATE info_requests SET status='CANCELLED' WHERE application_id=$1 AND status='OPEN'",
             [id],

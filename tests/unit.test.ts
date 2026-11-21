@@ -28,6 +28,44 @@ import {
 import { validate } from '../apps/api/src/validation.js';
 import { parseExtraction } from '../apps/api/src/extraction.js';
 describe('Deterministic rules', () => {
+  it.each([
+    ['Kaveri Textiles Limited', false],
+    ['Kaveri Textiles Private Limited', true],
+    ['kaveri  textiles Pvt. Ltd.', true],
+    ['Kaveri Textiles Private Limited Branch', false],
+  ])('requires review for material name differences: %s', (name, matched) => {
+    const form = demoForm();
+    for (const [doc_type, key] of [
+      ['PAN_CARD', 'name'],
+      ['GST_CERTIFICATE', 'legal_name'],
+      ['BANK_PROOF', 'account_holder_name'],
+    ] as const) {
+      const extraction = parseExtraction(
+        {
+          detected_document_type: doc_type,
+          legibility: 'CLEAR',
+          fields: Object.fromEntries(
+            Object.entries({ ...demoDocuments(form)[doc_type], [key]: name }).map(
+              ([field, value]) => [field, { value, confidence: 1 }],
+            ),
+          ),
+        },
+        doc_type,
+      );
+      const result = validate(form, [{ doc_type, extraction }]);
+      expect(result.findings).toContainEqual(
+        expect.objectContaining({
+          rule_code: 'V-DOC-NAME',
+          doc_type,
+          field_name: key,
+          passed: matched,
+          severity: 'REVIEW',
+          exception_type: 'NAME_MISMATCH',
+        }),
+      );
+      expect(result.validations[doc_type][key] === 'MATCH').toBe(matched);
+    }
+  });
   it('does not treat different non-Latin names or punctuation-only names as identical', () => {
     expect(nameSimilarity('राम कुमार', 'सीता देवी')).toBe(0);
     expect(nameSimilarity('राम कुमार', 'राम कुमार')).toBe(1);

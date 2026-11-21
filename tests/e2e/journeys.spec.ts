@@ -13,6 +13,42 @@ async function login(page: Page, role: 'merchant' | 'operator') {
     new RegExp(`/${role === 'merchant' ? 'merchant' : 'ops'}/applications`),
   );
 }
+test('wizard requires complete sections before continuing or jumping to review', async ({
+  page,
+}) => {
+  await login(page, 'merchant');
+  await page.getByRole('link', { name: 'New application', exact: true }).click();
+  const next = page.getByRole('button', { name: 'Continue', exact: true });
+  const review = page.locator('.wizard-steps button').last();
+  await review.click();
+  await expect(page.getByText('Enter a valid contact email address.')).toBeVisible();
+  await page.getByRole('button', { name: 'Use PDF sample details' }).click();
+  await next.click();
+  const pan = page.getByLabel(/^PAN/);
+  const original = await pan.inputValue();
+  await pan.fill('ABC');
+  await next.click();
+  await expect(pan).toHaveAttribute('aria-invalid', 'true');
+  await pan.fill(original);
+  await next.click();
+  const account = page.getByLabel(/^Account number/i);
+  await account.fill('12');
+  await page.getByLabel(/^Account holder name/i).fill('');
+  await review.click();
+  await expect(page.getByText('Enter 9 to 18 digits for your bank account number.')).toBeVisible();
+  await expect(
+    page.getByText('Enter the name on the bank account (at least 2 characters).'),
+  ).toBeVisible();
+  await account.fill('123456789');
+  await page.getByLabel(/^Account holder name/i).fill('Example Merchant');
+  await next.click();
+  await next.click();
+  await expect(page.getByRole('heading', { name: 'Documents', exact: true })).toBeVisible();
+  await expect(page.getByText('Choose a file for Pan Card.')).toBeVisible();
+  await page.getByRole('button', { name: 'Fill synthetic sample' }).click();
+  await next.click();
+  await expect(page.getByRole('heading', { name: 'Review', exact: true })).toBeVisible();
+});
 test('T-E1 merchant wizard → real signed HTTP callbacks → one activated merchant', async ({
   page,
 }) => {

@@ -1,5 +1,7 @@
 # Verification record
 
+Latest **21 November edge-case audit**: **90 tests passed**, strict TypeScript and production build passed, all **15 stress/browser invariants passed**, and the production dependency audit reported **0 vulnerabilities**. Upload retry duplication, mismatched callback request IDs and optional-field clearing were fixed. See [findings, evidence and limitations](edge-case-audit.md). The records below describe earlier runs.
+
 Verified locally on **20 November 2026**, Windows x64, using the project-local Node 22 runtime and real PostgreSQL 18.7. Docker is not installed on this machine. The Compose file targets PostgreSQL 16; the CI workflow is supplied but has not been executed remotely.
 
 ## Automated checks

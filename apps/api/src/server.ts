@@ -18,6 +18,7 @@ import {
   bankSchema,
   callbackSchema,
   formSchema,
+  formPatchSchema,
   infoItemSchema,
   noteSchema,
   scenarioSchema,
@@ -170,6 +171,40 @@ export async function buildServer(logging = false) {
     return { status: 'ok', extractor: config.extractor };
   });
   app.post(
+    '/api/v1/auth/register',
+    { config: { rateLimit: { max: 10, timeWindow: '1 minute' } } },
+    async (req, reply) => {
+      const body = z
+        .object({
+          display_name: z.string().trim().min(1).max(100),
+          email: z.string().trim().email().max(254).toLowerCase(),
+          password: z
+            .string()
+            .min(8)
+            .refine(
+              (value) => Buffer.byteLength(value) <= 72,
+              'Use at most 72 bytes for your password',
+            ),
+        })
+        .strict()
+        .parse(req.body);
+      const hash = await bcrypt.hash(body.password, 12);
+      const {
+        rows: [user],
+      } = await pool.query<User>(
+        "INSERT INTO users(email,password_hash,role,display_name) VALUES($1,$2,'MERCHANT',$3) ON CONFLICT(email) DO NOTHING RETURNING id,email,role,display_name",
+        [body.email, hash, body.display_name],
+      );
+      if (!user)
+        throw new AppError(
+          'EMAIL_IN_USE',
+          'This email is already registered. Sign in to continue.',
+          409,
+        );
+      return reply.code(201).send({ token: app.jwt.sign(user), user });
+    },
+  );
+  app.post(
     '/api/v1/auth/login',
     { config: { rateLimit: { max: 20, timeWindow: '1 minute' } } },
     async (req) => {
@@ -287,10 +322,18 @@ export async function buildServer(logging = false) {
           rows: [total],
         } = await pool.query(`SELECT count(*)::int AS n FROM applications a ${filter}`, args);
         const { rows } = await pool.query(
-          `SELECT a.*,(SELECT count(*) FROM application_exceptions e WHERE e.application_id=a.id AND e.status='OPEN') AS open_exceptions FROM applications a ${filter} ORDER BY created_at DESC LIMIT ${param(q.page_size)} OFFSET ${param((q.page - 1) * q.page_size)}`,
+          `SELECT a.*,u.display_name,u.email,(SELECT count(*) FROM application_exceptions e WHERE e.application_id=a.id AND e.status='OPEN') AS open_exceptions FROM applications a JOIN users u ON u.id=a.owner_user_id ${filter} ORDER BY a.created_at DESC LIMIT ${param(q.page_size)} OFFSET ${param((q.page - 1) * q.page_size)}`,
           args,
         );
-        return { items: rows.map(applications.summary), total: total.n };
+        return {
+          items: rows.map((row) => ({
+            ...applications.summary(row),
+            ...(req.user.role === 'OPERATOR' && {
+              submitted_by: { display_name: row.display_name, email: row.email },
+            }),
+          })),
+          total: total.n,
+        };
       });
       api.post('/applications', async (req, reply) => {
         const key = req.headers['idempotency-key'];
@@ -308,7 +351,7 @@ export async function buildServer(logging = false) {
       api.patch('/applications/:id', async (req) =>
         applications.editApplication(
           idOf(req),
-          formSchema.partial().parse(req.body),
+          formPatchSchema.parse(req.body),
           req.user,
           actor(req),
         ),
@@ -389,7 +432,10 @@ export async function buildServer(logging = false) {
           operator(req);
           const schema =
             action === 'reject'
-              ? noteSchema.extend({ reason_code: z.string().regex(/^[A-Z0-9_]{1,80}$/) })
+              ? noteSchema.extend({
+                  reason_code: z.string().regex(/^[A-Z0-9_]{1,80}$/),
+                  document_types: z.array(z.enum(DOC_TYPES)).max(3).optional(),
+                })
               : action === 'request-info'
                 ? noteSchema.extend({ items: z.array(infoItemSchema).min(1).max(20) })
                 : noteSchema;

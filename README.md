@@ -2,6 +2,8 @@
 
 A runnable merchant portal, operator console and durable verification workflow implementing the supplied [48-hour technical plan](docs/source-plan.txt). Built with React, TypeScript, Fastify and PostgreSQL. All demonstration information is synthetic.
 
+For a complete explanation, read the [end-to-end workflow and system design](docs/system-design.md). The [provider simulator guide](docs/provider-simulator.md) explains the purpose and every control on `/ops/simulator`.
+
 ## Run locally
 
 On this Windows machine, double-click **`start.cmd`** (or run `.\start.cmd` in PowerShell). It starts the persistent database, local Qwen model, API/worker, provider simulator and website in the background, checks that they are ready, and prints **http://localhost:5173**. Run **`stop.cmd`** to stop the full stack, including the model and database. Existing applications and uploads are preserved. Logs are saved to `.local/hosting.log` and `.local/hosting-error.log`. Startup can take several minutes while the model loads; do not launch it twice.
@@ -52,7 +54,7 @@ Vitest uses a **separate `onboard_test` database**, never the demo database. The
 
 ## Testing PDF uploads
 
-Choose **New application → Use PDF sample details** to fill the form matching the downloadable PAN, GST and bank PDFs. Upload each file in its corresponding slot. See [sample files and instructions](fixtures/README.md) and [matching form JSON](fixtures/sample-application.json). The separate **Fill synthetic sample** button generates fresh structured evidence with different identifiers. Reusing the fixed PDF identifiers can correctly trigger duplicate review.
+Choose **New application → Use PDF sample details** to fill the form matching the downloadable PAN, GST and bank PDFs. Upload each file in its corresponding slot. See [sample files and instructions](fixtures/README.md) and [matching form JSON](fixtures/sample-application.json). The separate **Fill synthetic sample** button generates a distinctly named demo business and fresh structured evidence with different identifiers. Reusing an existing GSTIN under the same merchant directs you to the existing application. Identifier matches across merchants or distinct registrations still trigger duplicate review.
 
 The classifier supports `PAN_CARD`, `GST_CERTIFICATE`, `BANK_PROOF`, `OTHER` (readable unrelated content) and `UNKNOWN` (unidentifiable content). `OTHER`, `UNKNOWN` and wrong-slot documents block verification through `V-DOC-TYPE` and require replacement. Upload slots remain restricted to PAN, GST and bank evidence.
 
@@ -145,4 +147,4 @@ Production would need managed keys/rotation, durable encrypted object storage, m
 
 Run `npm run test:stress` for isolated HTTP concurrency and browser regression tests, and `npm run test:stress:ai` for six concurrent callers of the running local model. The HTTP suite creates a separate database and document directory; it does not reset your applications. See [stress-test results and reproduction steps](docs/stress-testing.md).
 
-See [verification results](docs/verification.md), [the walkthrough](docs/demo.md), and [the supplied source plan](docs/source-plan.txt).
+See [the latest edge-case audit](docs/edge-case-audit.md), [verification results](docs/verification.md), [the walkthrough](docs/demo.md), and [the supplied source plan](docs/source-plan.txt).

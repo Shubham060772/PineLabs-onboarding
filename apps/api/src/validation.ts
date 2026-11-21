@@ -5,7 +5,7 @@ import {
   validIfsc,
   validAccount,
   normalize,
-  nameSimilarity,
+  normalizeName,
   reconcileField,
   type Form,
   type DocType,
@@ -153,7 +153,9 @@ export function validate(form: Form, docs: Array<{ doc_type: DocType; extraction
           key === 'account_holder_name'
             ? (form.bank_account?.account_holder_name ?? '')
             : form.legal_name;
-        const matched = nameSimilarity(field.value ?? '', expected) >= 0.85;
+        const extractedName = normalizeName(field.value ?? '');
+        // Similarity alone can hide missing legal-name words such as PRIVATE.
+        const matched = !!extractedName && extractedName === normalizeName(expected);
         const confident = readable && e.legibility === 'CLEAR' && field.confidence >= 0.8;
         add(
           'V-DOC-CONF',

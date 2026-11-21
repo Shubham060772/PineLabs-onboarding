@@ -70,6 +70,198 @@ afterAll(async () => {
   await api.close();
   await pool.end();
 });
+it('lets registered merchants sign in and isolates their applications while operators see both', async () => {
+  const ids: string[] = [];
+  const tokens: string[] = [];
+  for (const name of ['First', 'Second']) {
+    const payload = {
+      display_name: name,
+      email: name + '@example.test',
+      password: 'merchant-test-password',
+    };
+    const register = await api.inject({ method: 'POST', url: '/api/v1/auth/register', payload });
+    expect(register.statusCode).toBe(201);
+    expect(register.json().user.role).toBe('MERCHANT');
+    const login = await api.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: { email: payload.email, password: payload.password },
+    });
+    expect(login.statusCode).toBe(200);
+    tokens.push(login.json().token);
+    const draft = await api.inject({
+      method: 'POST',
+      url: '/api/v1/applications',
+      headers: { authorization: 'Bearer ' + register.json().token },
+      payload: demoForm(),
+    });
+    expect(draft.statusCode).toBe(201);
+    ids.push(draft.json().id);
+    const owner = { display_name: name, email: payload.email.toLowerCase() };
+    const operatorHeaders = { authorization: 'Bearer ' + otoken };
+    const list = await api.inject({ url: '/api/v1/applications', headers: operatorHeaders });
+    expect(
+      list.json().items.find((item: { id: string }) => item.id === draft.json().id).submitted_by,
+    ).toEqual(owner);
+    const url = '/api/v1/applications/' + draft.json().id;
+    expect((await api.inject({ url, headers: operatorHeaders })).json().submitted_by).toEqual({
+      ...owner,
+      id: register.json().user.id,
+    });
+    expect(
+      (
+        await api.inject({ url, headers: { authorization: 'Bearer ' + login.json().token } })
+      ).json(),
+    ).not.toHaveProperty('submitted_by');
+    const duplicate = await api.inject({
+      method: 'POST',
+      url: '/api/v1/auth/register',
+      payload: { ...payload, email: payload.email.toUpperCase() },
+    });
+    expect(duplicate.statusCode).toBe(409);
+  }
+  async function visible(token: string) {
+    const response = await api.inject({
+      url: '/api/v1/applications',
+      headers: { authorization: 'Bearer ' + token },
+    });
+    return response.json().items.map((item: { id: string }) => item.id);
+  }
+  expect(await visible(tokens[0])).toEqual([ids[0]]);
+  expect(await visible(tokens[1])).toEqual([ids[1]]);
+  expect(await visible(otoken)).toEqual(expect.arrayContaining(ids));
+  const elevated = await api.inject({
+    method: 'POST',
+    url: '/api/v1/auth/register',
+    payload: {
+      display_name: 'Third',
+      email: 'third@example.test',
+      password: 'another-password',
+      role: 'OPERATOR',
+    },
+  });
+  expect(elevated.statusCode).toBe(400);
+});
+it('rejects non-JSON webhook bodies without a server error', async () => {
+  const response = await api.inject({
+    method: 'POST',
+    url: '/api/v1/webhooks/providers/pan',
+    headers: {
+      'content-type': 'application/octet-stream',
+      'x-provider-timestamp': String(Math.floor(Date.now() / 1000)),
+      'x-provider-signature': 'a'.repeat(64),
+    },
+    payload: Buffer.from('invalid'),
+  });
+  expect(response.statusCode).toBe(415);
+});
+it('rejects a callback referring to a different acknowledged provider request', async () => {
+  const id = await create();
+  const attempt = (await attempts(id, 'PAN'))[0];
+  await pool.query(
+    "UPDATE check_attempts SET status='AWAITING_CALLBACK',provider_request_id=$2,deadline_at=now()+interval '1 minute' WHERE id=$1",
+    [attempt.id, 'expected-provider-request'],
+  );
+  await expect(
+    callback(attempt, { provider_request_id: 'wrong-provider-request' }),
+  ).rejects.toMatchObject({ code: 'PROVIDER_REQUEST_MISMATCH' });
+  expect(
+    (await pool.query('SELECT status FROM check_attempts WHERE id=$1', [attempt.id])).rows[0]
+      .status,
+  ).toBe('AWAITING_CALLBACK');
+  expect(
+    (await callback(attempt, { provider_request_id: 'expected-provider-request' })).outcome,
+  ).toBe('APPLIED');
+});
+it.each(['FILE', 'STRUCTURED'] as const)(
+  'repeated %s uploads keep the same document record',
+  async (source) => {
+    const a = await createApplication(demoForm(), merchant, mActor());
+    const input =
+      source === 'FILE'
+        ? { doc_type: 'PAN_CARD' as const, file: await readFile('fixtures/documents/pan_card.pdf') }
+        : { doc_type: 'PAN_CARD' as const, structured_payload: demoDocuments(demoForm()).PAN_CARD };
+    const uploaded = await Promise.all(
+      Array.from({ length: 5 }, () => uploadDocument(a.id, input, merchant, mActor())),
+    );
+    expect(new Set(uploaded.map((d) => d.id)).size).toBe(1);
+    expect(
+      (await pool.query('SELECT count(*)::int n FROM documents WHERE application_id=$1', [a.id]))
+        .rows[0].n,
+    ).toBe(1);
+    expect(
+      (
+        await pool.query(
+          "SELECT count(*)::int n FROM audit_events WHERE application_id=$1 AND event_type='DOCUMENT_UPLOADED'",
+          [a.id],
+        )
+      ).rows[0].n,
+    ).toBe(1);
+  },
+);
+it('saves holder and IFSC corrections without requiring the masked account number again', async () => {
+  const form = demoForm();
+  const app = await createApplication(form, merchant, mActor());
+  for (const bankPatch of [
+    { account_holder_name: 'Corrected Account Holder' },
+    { ifsc: 'TEST0000001' },
+  ]) {
+    const response = await api.inject({
+      method: 'PATCH',
+      url: `/api/v1/applications/${app.id}`,
+      headers: { authorization: `Bearer ${mtoken}` },
+      payload: { bank_account: bankPatch },
+    });
+    expect(response.statusCode).toBe(200);
+  }
+  const updated = await detail(app.id, merchant);
+  expect(updated.form.bank_account_holder_name).toBe('Corrected Account Holder');
+  expect(updated.form.bank_ifsc).toBe('TEST0000001');
+  expect(updated.form.bank_account_masked).toBe(
+    '*'.repeat(form.bank_account!.account_number.length - 4) +
+      form.bank_account!.account_number.slice(-4),
+  );
+  const invalid = await api.inject({
+    method: 'PATCH',
+    url: `/api/v1/applications/${app.id}`,
+    headers: { authorization: `Bearer ${mtoken}` },
+    payload: { bank_account: { account_holder_name: '' } },
+  });
+  expect(invalid.statusCode).toBe(400);
+  await submit(app.id, merchant, mActor());
+  await intake(app.id);
+  expect((await detail(app.id, merchant)).form.bank_account_holder_name).toBe(
+    'Corrected Account Holder',
+  );
+});
+it('clears optional form fields and rejects empty required names without losing existing data', async () => {
+  const app = await createApplication(demoForm(), merchant, mActor());
+  const headers = { authorization: `Bearer ${mtoken}` };
+  expect(
+    (
+      await api.inject({
+        method: 'PATCH',
+        url: `/api/v1/applications/${app.id}`,
+        headers,
+        payload: { trade_name: '', pincode: null },
+      })
+    ).statusCode,
+  ).toBe(200);
+  const d = await detail(app.id, merchant);
+  expect(d.form.trade_name).toBe('');
+  expect(d.form.pincode).toBeUndefined();
+  expect(
+    (
+      await api.inject({
+        method: 'PATCH',
+        url: `/api/v1/applications/${app.id}`,
+        headers,
+        payload: { legal_name: '' },
+      })
+    ).statusCode,
+  ).toBe(400);
+  expect((await detail(app.id, merchant)).form.legal_name).toBe(demoForm().legal_name);
+});
 async function create(f = demoForm(), modify?: (type: string, payload: any) => void) {
   const a = await createApplication(f, merchant, mActor());
   for (const [type, p] of Object.entries(demoDocuments(f))) {
@@ -564,6 +756,164 @@ it('T-I13 low confidence proceeds to verification and human review', async () =>
   await finish(a.id);
   expect((await state(a.id)).status).toBe('IN_REVIEW');
 });
+it('keeps GST review consistent with passed API results and reviewer resolution', async () => {
+  const id = await create(demoForm(), (type, payload) => {
+    if (type === 'GST_CERTIFICATE') payload.legal_name = 'Kaveri Textiles Limited';
+  });
+  await finish(id);
+  const reviewed = await detail(id, operator);
+  expect(reviewed.status).toBe('IN_REVIEW');
+  expect(reviewed.verification_summary).toMatchObject({
+    cleared: 3,
+    provider_passed: 4,
+    documents_in_review: 1,
+  });
+  expect(reviewed.checks.find((c) => c.check_type === 'GST')).toMatchObject({
+    status: 'PASSED',
+    display_status: 'IN_REVIEW',
+  });
+  expect(reviewed.documents.find((d) => d.doc_type === 'GST_CERTIFICATE')?.document_status).toBe(
+    'IN_REVIEW',
+  );
+  expect(reviewed.allowed_actions).not.toContain('APPROVE');
+  const exception = reviewed.exceptions.find((e) => e.type === 'NAME_MISMATCH')!;
+  await operatorAction(
+    id,
+    'resolve',
+    { resolution: 'ACCEPTED', note: 'Reviewed supporting evidence for this name' },
+    operator,
+    oActor(),
+    exception.id,
+  );
+  const resolved = await detail(id, operator);
+  expect(resolved.status).toBe('IN_REVIEW');
+  expect(resolved.verification_summary).toMatchObject({ cleared: 4, documents_in_review: 0 });
+  expect(resolved.documents.find((d) => d.doc_type === 'GST_CERTIFICATE')?.document_status).toBe(
+    'COMPLETED',
+  );
+  expect(
+    resolved.findings.find((f) => f.rule_code === 'V-DOC-NAME' && f.doc_type === 'GST_CERTIFICATE'),
+  ).toMatchObject({ passed: false, display_status: 'RESOLVED' });
+  expect(resolved.allowed_actions).toContain('APPROVE');
+  // A prior decision must not clear the same finding on a later submission.
+  await operatorAction(
+    id,
+    'request-info',
+    {
+      note: 'Please provide the corrected GST evidence',
+      items: [
+        {
+          code: 'GST_FIX',
+          target_type: 'DOCUMENT',
+          target: 'GST_CERTIFICATE',
+          message: 'Replace the GST document',
+        },
+      ],
+    },
+    operator,
+    oActor(),
+  );
+  await submit(id, merchant, mActor());
+  await intake(id);
+  expect(
+    (await detail(id, operator)).documents.find((d) => d.doc_type === 'GST_CERTIFICATE')
+      ?.document_status,
+  ).toBe('IN_REVIEW');
+});
+it('rejection closes exceptions and marks only the rejected evidence invalid', async () => {
+  const id = await create(demoForm(), (type, fields) => {
+    if (type === 'GST_CERTIFICATE') fields.legal_name = 'Kaveri Textiles Limited';
+  });
+  await finish(id);
+  const response = await api.inject({
+    method: 'POST',
+    url: `/api/v1/applications/${id}/reject`,
+    headers: { authorization: `Bearer ${otoken}` },
+    payload: {
+      reason_code: 'INVALID_DOCUMENTS',
+      document_types: ['GST_CERTIFICATE'],
+      note: 'GST legal name does not match the declared business.',
+    },
+  });
+  expect(response.statusCode).toBe(200);
+  for (const user of [merchant, operator]) {
+    const d = await detail(id, user);
+    expect(d.status).toBe('REJECTED');
+    expect(d.verification_summary).toMatchObject({ open_exceptions: 0, documents_in_review: 0 });
+    expect(d.documents.find((x) => x.doc_type === 'GST_CERTIFICATE')?.document_status).toBe(
+      'INVALID',
+    );
+    expect(d.documents.find((x) => x.doc_type === 'PAN_CARD')?.document_status).toBe('COMPLETED');
+    expect(d.checks.find((x) => x.check_type === 'GST')).toMatchObject({
+      status: 'PASSED',
+      display_status: 'INVALID',
+    });
+    expect(
+      d.exceptions.every((x) => x.status === 'CLOSED' && x.resolution === 'APPLICATION_REJECTED'),
+    ).toBe(true);
+    expect(d.allowed_actions).toEqual([]);
+  }
+  expect(
+    (
+      await pool.query(
+        "SELECT count(*)::int n FROM application_exceptions WHERE application_id=$1 AND status='OPEN'",
+        [id],
+      )
+    ).rows[0].n,
+  ).toBe(0);
+});
+it('business rejection cancels outstanding review without claiming documents are invalid', async () => {
+  const id = await create(demoForm(), (type, fields) => {
+    if (type === 'GST_CERTIFICATE') fields.legal_name = 'Different Business';
+  });
+  await finish(id);
+  await operatorAction(
+    id,
+    'reject',
+    {
+      reason_code: 'BUSINESS_REQUIREMENTS_NOT_MET',
+      note: 'Business category not supported by this merchant programme.',
+    },
+    operator,
+    oActor(),
+  );
+  const d = await detail(id, merchant);
+  expect(d.documents.find((x) => x.doc_type === 'GST_CERTIFICATE')?.document_status).toBe(
+    'REJECTED',
+  );
+  expect(d.documents.some((x) => x.document_status === 'INVALID')).toBe(false);
+  expect(d.exceptions.some((x) => x.status === 'OPEN')).toBe(false);
+});
+it('migration repairs previously rejected applications without accepting their review findings', async () => {
+  const id = await create(demoForm(), (type, fields) => {
+    if (type === 'GST_CERTIFICATE') fields.legal_name = 'Different Business';
+  });
+  await finish(id);
+  await pool.query(
+    "UPDATE applications SET status='REJECTED',rejection_reason_code='INVALID_DOCUMENTS' WHERE id=$1",
+    [id],
+  );
+  const sql = await readFile('apps/api/migrations/002_rejection_closure.sql', 'utf8');
+  await pool.query(sql);
+  await pool.query(sql);
+  const d = await detail(id, merchant);
+  expect(d.documents.find((x) => x.doc_type === 'GST_CERTIFICATE')?.document_status).toBe(
+    'INVALID',
+  );
+  expect(d.exceptions.every((x) => x.status === 'CLOSED')).toBe(true);
+  expect(
+    d.findings.find((x) => x.rule_code === 'V-DOC-NAME' && x.doc_type === 'GST_CERTIFICATE')
+      ?.display_status,
+  ).toBe('INVALID');
+  expect(
+    (
+      await pool.query(
+        "SELECT count(*)::int n FROM audit_events WHERE application_id=$1 AND event_type='EXCEPTION_CLOSED'",
+        [id],
+      )
+    ).rows[0].n,
+  ).toBe(1);
+});
 it('T-I14 guard rejects unresolved exceptions and failed checks', async () => {
   const id = await medium();
   await expect(
@@ -694,7 +1044,18 @@ it('T-I20 raw-body HMAC rejects tampering and stale timestamps', async () => {
 it('T-I21 exact duplicates require review', async () => {
   const first = await create();
   await finish(first);
-  const id = await create();
+  const actor: Actor = { type: 'MERCHANT', id: other.id };
+  const second = await createApplication(demoForm(), other, actor);
+  for (const type of DOC_TYPES)
+    await uploadDocument(
+      second.id,
+      { doc_type: type, structured_payload: demoDocuments(demoForm())[type] },
+      other,
+      actor,
+    );
+  await submit(second.id, other, actor);
+  await intake(second.id);
+  const id = second.id;
   await finish(id);
   expect((await state(id)).status).toBe('IN_REVIEW');
   expect(
@@ -886,6 +1247,38 @@ it('creation idempotency and double submit are safe', async () => {
   await expect(submit(a.id, merchant, mActor())).rejects.toMatchObject({
     code: 'INVALID_TRANSITION',
   });
+});
+it('different keys and repeated new forms cannot create duplicate registrations for one merchant', async () => {
+  const form = demoForm();
+  const responses = await Promise.all(
+    Array.from({ length: 12 }, () =>
+      api.inject({
+        method: 'POST',
+        url: '/api/v1/applications',
+        headers: { authorization: `Bearer ${mtoken}`, 'idempotency-key': randomUUID() },
+        payload: form,
+      }),
+    ),
+  );
+  expect(responses.filter((r) => r.statusCode === 201)).toHaveLength(1);
+  expect(responses.filter((r) => r.statusCode === 409)).toHaveLength(11);
+  const created = responses.find((r) => r.statusCode === 201)!.json();
+  for (const r of responses.filter((r) => r.statusCode === 409)) {
+    expect(r.json().error).toMatchObject({
+      code: 'APPLICATION_EXISTS',
+      details: { application_id: created.id },
+    });
+  }
+  await expect(
+    createApplication({ ...form, legal_name: 'Corrected Name' }, merchant, mActor()),
+  ).rejects.toMatchObject({ code: 'APPLICATION_EXISTS' });
+  expect((await pool.query('SELECT count(*)::int n FROM applications')).rows[0].n).toBe(1);
+  // Another merchant must not learn the existing application's ID through this guard.
+  expect((await createApplication(form, other, { type: 'MERCHANT', id: other.id })).id).not.toBe(
+    created.id,
+  );
+  // A distinct registration with the same name is not automatically a duplicate.
+  expect((await createApplication(demoForm(2), merchant, mActor())).id).not.toBe(created.id);
 });
 
 it('metrics aggregates, review queue, policies and dead letters are readable only by operators', async () => {
